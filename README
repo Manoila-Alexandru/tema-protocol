@@ -1,0 +1,158 @@
+TEMA 2 PCOM 
+Manoila-Stoiculete Alexandru-Constantin grupa 322CD 
+
+Acest proiect implementeaza un protocol de transport reliable peste UDP, similar
+conceptual cu TCP. Protocolul asigura livrarea ordonata si fara pierderi a
+datelor intre un sender si un receiver, folosind tehnica Selective Repeat ARQ.
+
+Implementarea este impartita in doua module principale:
+libsend.cpp  : logica clientilor
+librecv.cpp  : logica serverului
+
+STRUCTURA PROTOCOLULUI
+Protocolul foloseste cele 2 tipuri de segmente deja prezente in skelet (cel de date si cel de control) +
+inca o structura de 2 bytes ce contine payload-ului unui pachet SYN-ACK (noul port pentru client):
+
+STABILIREA CONEXIUNII (THREE-WAY HANDSHAKE)
+Conexiunile sunt initiate pe portul 8032 al serverului.
+
+  1. Sender trimite SYN catre portul 8032.
+  2. Receiver raspunde cu SYN-ACK, care contine in payload portul de date
+     alocat dinamic pentru aceasta conexiune.
+  3. Sender trimite ACK (de 3 ori, pentru a reduce efectul pierderilor UDP)
+     catre noul port de date. (Daca se pierd toate cele 3 ack-uri, nu se poate determina comportamentul aplicatiei) 
+
+Dupa handshake, toata comunicatia are loc intre socket-ul senderului si
+socket-ul de date dedicat al conexiunii pe receiver.
+
+MECANISME PRINCIPALE
+  Selective Repeat ARQ
+    Fiecare segment neconfirmat este retinut intr-o fereastra (send_window). Un timer per conexiune (nu per segment) se
+    declanseaza periodic; la expirare, toate segmentele neconfirmate din
+    fereastra sunt retransmise. La receiver, segmentele out-of-order sunt
+    stocate in fereastra de receptie (recv_window) si livrate aplicatiei
+    doar cand se formeaza un sir continuu incepand de la recv_base.
+
+  ACK Cumulativ
+    Receiver-ul trimite un singur ACK cu ack_num = recv_base, care confirma
+    implicit toate segmentele cu seq < recv_base. Senderul avanseaza
+    send_base pana la ack_num la primirea unui ACK valid.
+
+  Flow Control
+    Fiecare ACK trimis de receiver include recv_window, reprezentand numarul
+    de segmente libere din buffer-ul sau intern. Senderul nu depaseste
+    aceasta limita. Daca recv_window == 0, senderul trimite totusi un
+    segment pentru a preveni deadlock-ul in cazul in
+    care un ACK de redeschidere a ferestrei se pierde.
+
+FIRE DE EXECUTIE SI SINCRONIZARE
+Fiecare modul porneste un thread de fundal la initializare:
+
+  sender_handler
+    Asteapta ACK-uri primite de la receiver si verifica timerul de
+    retransmisie. La primirea unui ACK, avanseaza fereastra si incearca
+    sa trimita date noi (try_flush). La expirarea timerului, retransmite
+    segmentele neconfirmate.
+
+  receiver_handler
+    Asteapta segmente DATA de la sender si pe timerul periodic de ACK.
+    La primirea unui segment valid, il stocheaza in fereastra de receptie,
+    incearca livrarea in ordine catre aplicatie si trimite un ACK. La
+    expirarea timerului, retrimite ACK-ul curent (recuperare din pierderi).
+
+Accesul la starea fiecarei conexiuni este protejat de un mutex per conexiune
+(con->con_lock), care previne race conditions intre thread-ul aplicatiei si
+thread-ul de fundal.
+
+Mecanismul de polling (poll + timerfd) este gestionat de functia
+recv_message_or_timeout() din skelet. Am pus niste sleep-uri suplimentare intr-o bucla pana 
+la stabilirea primei conexiuni, altfel assert-ul din functie termina executia programului. 
+
+API PUBLIC
+  Sender:
+    void init_sender(int speed, int delay)
+      Initializeaza modulul si porneste thread-ul de fundal.
+
+    int setup_connection(uint32_t ip, uint16_t port)
+      Executa handshake-ul si returneaza conn_id-ul conexiunii stabilite.
+
+    int send_data(int conn_id, char *buffer, int len)
+      Pune date in coada de trimitere si le impinge pe retea cat permite
+      fereastra. Returneaza numarul de bytes acceptati sau -1 daca buffer-ul
+      e plin.
+
+  Receiver:
+    void init_receiver(int recv_buffer_bytes)
+      Initializeaza modulul, leaga socket-ul pe portul 8032 si porneste
+      thread-ul de fundal. recv_buffer_bytes configureaza capacitatea
+      buffer-ului de receptie per conexiune.
+
+    int wait4connect(uint32_t ip, uint16_t port)
+      Blocheaza pana la primirea unui SYN de la un client nou, executa
+      handshake-ul si returneaza conn_id-ul conexiunii.
+
+    int recv_data(int conn_id, char *buffer, int len)
+      Blocheaza pana cand sunt disponibili cel putin 1 byte, apoi copiaza
+      pana la len bytes in buffer. Returneaza numarul de bytes copiati.
+
+
+CONSTANTE IMPORTANTE  (lib.h / protocol.h)
+  POLI_PROTOCOL_ID  42 (Deja prezent in skelet)
+    Identificatorul protocolului, prezent in fiecare segment pentru a
+    distinge pachetele acestui protocol de alte datagrame UDP.
+
+  MAX_DATA_SIZE 512 bytes (Deja prezent in skelet)
+    Dimensiunea maxima a payload-ului unui segment de date.
+
+  MAX_SEGMENT_SIZE  MAX_DATA_SIZE + sizeof(poli_tcp_data_hdr) (Deja prezent in skelet)
+    Dimensiunea maxima a unui segment complet (header + payload).
+
+  WINDOW_SIZE 64 segmente (Evaluat pe baza BDP-ului din topologie, hardcodat)
+    Dimensiunea ferestrei glisante, atat la sender cat si la receiver.
+    Determina numarul maxim de segmente in zbor simultan.
+
+  APP_BUFFER_SIZE 131072 bytes (128 KB)
+    Capacitatea buffer-ului circular al aplicatiei, folosit atat pentru
+    coada de trimitere (send_app_buffer) cat si pentru datele livrate
+    aplicatiei la receptie (app_buffer).
+
+  MAX_CONNECTIONS 32 (Deja prezent in skelet)
+    Numarul maxim de conexiuni simultane suportate.
+
+Tipuri de segmente (protocol.h):
+  DATA 0
+  ACK 1
+  SYN 2
+  SYN_ACK 3
+
+NOUA STRUCTURA DE CONNECTION 
+  struct connection
+    
+    Comune:
+      sockfd          Descriptorul socket-ului UDP al conexiunii
+      conn_id         Identificatorul unic al conexiunii
+      servaddr        Adresa si portul partii remote
+      con_lock        Mutex pentru acces concurent la starea conexiunii
+      lastack         Ultima valoare ACK trimisa/primita (bookkeeping)
+
+    Sender:
+      max_window_seq          Limita locala a ferestrei (nr. max segmente in zbor)
+      seq_next                Urmatorul numar de secventa de asignat
+      send_base               Primul segment trimis si neconfirmat inca
+      remote_window           Fereastra advertizata de receiver (flow control)
+      send_window[][]         Buffer circular cu segmentele trimise, neACK-ate
+      send_window_len[]       Lungimea fiecarui segment din fereastra
+      send_window_acked[]     Flag: segmentul a fost confirmat de receiver
+      send_app_buffer[]       Buffer circular cu datele venite de la aplicatie
+      send_app_head/tail      Capetele buffer-ului circular al aplicatiei
+      send_app_count          Numarul de bytes in asteptare in buffer
+
+    Receiver:
+      recv_base               Urmatorul numar de secventa asteptat in ordine
+      recv_buffer_size        Capacitatea totala a buffer-ului de receptie
+      recv_window_data[][]    Buffer circular cu segmentele receptionate
+      recv_window_len[]       Lungimea payload-ului fiecarui segment primit
+      recv_window_valid[]     Flag: slot-ul contine un segment valid
+      app_buffer[]            Buffer circular cu date gata de livrat aplicatiei
+      app_buffer_head/tail    Capetele buffer-ului circular al aplicatiei
+      app_buffer_count        Numarul de bytes disponibili pentru aplicatie

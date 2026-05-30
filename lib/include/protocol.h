@@ -28,7 +28,7 @@ struct __attribute__((packed)) poli_tcp_ctrl_hdr {
     uint16_t recv_window;
 };
 
-/* SYN-ACK carries the data port the server assigned for this connection */
+/* Payload of syn-ack segment */
 struct __attribute__((packed)) syn_ack_payload {
     uint16_t data_port;
 };

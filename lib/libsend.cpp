@@ -24,18 +24,20 @@ int fdmax = 0;
 static int g_max_window_seq = WINDOW_SIZE;
 
 static void send_segment(struct connection *con, uint16_t seq) {
+    // TODO: Done - Transmit a segment from the send window
     int idx = seq % WINDOW_SIZE;
     sendto(con->sockfd, con->send_window[idx], con->send_window_len[idx], 0, (struct sockaddr *)&con->servaddr, sizeof(con->servaddr));
 }
 
 static void try_flush(struct connection *con) {
+    // TODO: Done - Empty the application level buffer
     while (con->send_app_count > 0) {
         uint16_t in_flight = (uint16_t)(con->seq_next - con->send_base);
         uint16_t max_allowed = (uint16_t)con->max_window_seq;
 
         if (con->remote_window < max_allowed) max_allowed = con->remote_window;
-        if (max_allowed == 0) max_allowed = 1;
-        if (in_flight >= max_allowed) break;
+        if (max_allowed == 0) max_allowed = 1; // send a segment anyway to get new recv_window
+        if (in_flight >= max_allowed) break; // stop if the window is full
 
         int payload_len = con->send_app_count;
         if (payload_len > MAX_DATA_SIZE) payload_len = MAX_DATA_SIZE;
@@ -50,6 +52,7 @@ static void try_flush(struct connection *con) {
 
         char *dst = con->send_window[idx] + sizeof(struct poli_tcp_data_hdr);
 
+        // Copy payload_len bytes from the app buffer into the window
         for (int i = 0; i < payload_len; i++) {
             dst[i] = con->send_app_buffer[con->send_app_head];
             con->send_app_head = (con->send_app_head + 1) % APP_BUFFER_SIZE;
@@ -65,6 +68,7 @@ static void try_flush(struct connection *con) {
 
 int send_data(int conn_id, char *buffer, int len)
 {
+    // TODO: Done - Enqueue the data for transmission on a connection
     int size = 0;
 
     pthread_mutex_lock(&cons[conn_id]->con_lock);
@@ -80,7 +84,7 @@ int send_data(int conn_id, char *buffer, int len)
         }
         con->send_app_count += to_copy;
         size = to_copy;
-        try_flush(con);
+        try_flush(con); // Try to send segments once they are ready
     }
 
     pthread_mutex_unlock(&cons[conn_id]->con_lock);
@@ -89,11 +93,13 @@ int send_data(int conn_id, char *buffer, int len)
 
 void *sender_handler(void *arg)
 {
+    // TODO: Done - Handle ACKs and transmission timeouts
     int res;
     char buf[MAX_SEGMENT_SIZE];
 
     while (1) {
-        if (cons.size() == 0) {
+        // If no connection exists assert fails in recv_message_or_timeout
+        if (!cons.size()) {
             usleep(1000);
             continue;
         }
@@ -107,6 +113,8 @@ void *sender_handler(void *arg)
         struct connection *con = cons[conn_id];
 
         if (res == -1) {
+            // res == -1 transmission expired 
+            // Resend all packets that are unacknowledged
             for (uint16_t s = con->send_base; s != con->seq_next; s++) {
                 int idx = s % WINDOW_SIZE;
 
@@ -131,7 +139,7 @@ void *sender_handler(void *arg)
                 }
             }
         }
-
+        // Try to send packets
         try_flush(con);
         pthread_mutex_unlock(&cons[conn_id]->con_lock);
     }
@@ -139,6 +147,7 @@ void *sender_handler(void *arg)
 
 int setup_connection(uint32_t ip, uint16_t port)
 {
+    // TODO: Done - Implement 3 way handshake on the client side
     struct connection *con = (struct connection *)calloc(1, sizeof(struct connection));
     int conn_id = 0;
     con->sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -154,6 +163,7 @@ int setup_connection(uint32_t ip, uint16_t port)
     tv.tv_usec = 100000;
     setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    // Build syn segment
     struct poli_tcp_ctrl_hdr syn;
     memset(&syn, 0, sizeof(syn));
     syn.protocol_id = POLI_PROTOCOL_ID;
@@ -164,14 +174,18 @@ int setup_connection(uint32_t ip, uint16_t port)
     char recv_buf[MAX_SEGMENT_SIZE];
 
     while (1) {
+        // Retransmit syn until a syn-ack is received 
         sendto(con->sockfd, &syn, sizeof(syn), 0, (struct sockaddr *)&con->servaddr, sizeof(con->servaddr));
 
         struct sockaddr_in from;
         socklen_t from_len = sizeof(from);
         int n = recvfrom(con->sockfd, recv_buf, sizeof(recv_buf), 0, (struct sockaddr *)&from, &from_len);
+
         if (n >= (int)(sizeof(struct poli_tcp_ctrl_hdr) + sizeof(struct syn_ack_payload))) {
             struct poli_tcp_ctrl_hdr *sa = (struct poli_tcp_ctrl_hdr *)recv_buf;
+
             if (sa->protocol_id == POLI_PROTOCOL_ID && sa->type == SYN_ACK) {
+                // syn-ack segment received 
                 struct syn_ack_payload *p = (struct syn_ack_payload *)(recv_buf + sizeof(struct poli_tcp_ctrl_hdr));
                 con->servaddr.sin_port = p->data_port;
                 con->conn_id = sa->conn_id;
@@ -182,6 +196,7 @@ int setup_connection(uint32_t ip, uint16_t port)
         }
     }
 
+    // Build ack
     struct poli_tcp_ctrl_hdr ack;
     memset(&ack, 0, sizeof(ack));
     ack.protocol_id = POLI_PROTOCOL_ID;
@@ -189,11 +204,13 @@ int setup_connection(uint32_t ip, uint16_t port)
     ack.type = ACK;
     ack.recv_window = WINDOW_SIZE;
 
+    // Send 3 acks. If all of them are lost it's over...
     for (int i = 0; i < 3; i++) sendto(con->sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&con->servaddr, sizeof(con->servaddr));
     tv.tv_sec = 0;
     tv.tv_usec = 0;
     setsockopt(con->sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
+    // Initialize all fields necessary for connection
     con->seq_next = 0;
     con->send_base = 0;
     con->lastack = 0;
@@ -224,6 +241,8 @@ int setup_connection(uint32_t ip, uint16_t port)
 
 void init_sender(int speed, int delay)
 {
+    //TODO: Done Initialize the sender
+    // Already hardcoded window size based on the topology BDP. Can't use speed / delay here brochacho
     pthread_t thread1;
     int ret;
 
