@@ -1,1 +1,10 @@
 .vscode
+archive.zip
+client
+client.o
+file.out
+lib/libcommon.o
+lib/librecv.o
+lib/libsend.o 
+server 
+server.o

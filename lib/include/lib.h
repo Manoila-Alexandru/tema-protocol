@@ -4,47 +4,62 @@
 #include <cstdint>
 #include "utils.h"
 #include <arpa/inet.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include "protocol.h"
 
-/* Maximum segment size, change as you see fit */
+/* Maximum segment size */
 #define MAX_DATA_SIZE 512
 #define MAX_SEGMENT_SIZE (MAX_DATA_SIZE + sizeof(poli_tcp_data_hdr))
 
 #define MAX_CONNECTIONS 32
 
-/* Protocol control block. Used track different parameters about a connection. 
- * Will need to be extenden to solve the homework with other parameters such as
- * last_ack or status depending on how you implement your protocol. */
+/* Window size in segments */
+#define WINDOW_SIZE 64
+
+/* Application buffer size (128KB) */
+#define APP_BUFFER_SIZE (128 * 1024)
+
 struct connection {
-    /* common window for both the sender and receiver. */
-    /* list window: A window representation */
-    int sockfd; /* socket used for this connection */
-    int conn_id; /* connection identifier */
-    struct sockaddr_in servaddr; /* used to identify the destination */
-    pthread_mutex_t con_lock; /* Used for syncronization with the handler thread and read/send calls.*/
+    int sockfd;
+    int conn_id;
+    struct sockaddr_in servaddr;
+    pthread_mutex_t con_lock;
 
-    /* TODO. Parameters used only by the sender */
-    int max_window_seq; /* Used to store the max number of packets that can be inflight, since we can
-                           have many more packets in our window */
+    int max_window_seq;
+    uint16_t seq_next;
+    uint16_t send_base;
+    uint16_t lastack;
+    uint16_t remote_window;
 
-    /* TODO. Parameters used only by the client */
+    /* The fields below are used only by the sender*/
+    char send_window[WINDOW_SIZE][MAX_SEGMENT_SIZE];
+    int  send_window_len[WINDOW_SIZE];
+    bool send_window_acked[WINDOW_SIZE];
+
+    char send_app_buffer[APP_BUFFER_SIZE];
+    int  send_app_head;
+    int  send_app_tail;
+    int  send_app_count;
+
+    uint16_t recv_base;
+    int recv_buffer_size;
+
+    /* The fields below are used only by the receiver*/
+    char recv_window_data[WINDOW_SIZE][MAX_DATA_SIZE];
+    int  recv_window_len[WINDOW_SIZE];
+    bool recv_window_valid[WINDOW_SIZE];
+
+    char app_buffer[APP_BUFFER_SIZE];
+    int  app_buffer_head;
+    int  app_buffer_tail;
+    int  app_buffer_count;
 };
 
-/* ########## API that we expose to the application ########### */
-
-/* Equivalent of listen. Ran by the server to waits for a connection from a
- * client. Returns a connection id. Blocking untill it receives a connection
- * request */
 int wait4connect(uint32_t ip, uint16_t port);
-/* Equivalent of connect. Used by the client to connect to a server. */
 int setup_connection(uint32_t ip, uint16_t port);
-/* Equivalent to recv. Blocking if there is no data to be written in buffer */
 int recv_data(int connectionid, char *buffer, int len);
-/* Equivalent to send. Used by the client to send a stream of bytes as segments */
 int send_data(int conn_id, char *buffer, int len);
-/* Used to initialize your protocol on the receiver side. */
 void init_receiver(int recv_buffer_bytes);
-/* Used to initialize your protocol on the sender side */
 void init_sender(int speed, int delay);
-
-/* ######### Internal API used by sender and receiver ########### */
 int recv_message_or_timeout(char *buff, size_t len, int *conn_id);

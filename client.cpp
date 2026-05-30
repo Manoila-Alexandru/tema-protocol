@@ -80,6 +80,7 @@ int main(int argc, char *argv[])
 
     printf("Finished sending the file\n");
     /* Give the other thread time to finish the transmission */
+    /* Brochacho wut?*/
     while (1) {}
 
     return 0; 
